@@ -54,7 +54,7 @@ class AdapterStat:
     sent_bytes: int
 
 
-@dataclass(frozen=True)
+@dataclass
 class Connection:
     proto: str
     local: str
@@ -64,10 +64,20 @@ class Connection:
     process: str
     remote_port: str
     observed_at: datetime
+    last_seen_at: datetime | None = None
+    seen_count: int = 1
 
     @property
     def key(self) -> str:
         return f"{self.proto}|{self.local}|{self.remote}|{self.state}|{self.pid}"
+
+    def touch(self, observed_at: datetime) -> None:
+        self.last_seen_at = observed_at
+        self.seen_count += 1
+
+    @property
+    def last_seen(self) -> datetime:
+        return self.last_seen_at or self.observed_at
 
 
 @dataclass
@@ -139,6 +149,8 @@ def get_process_map() -> dict[str, str]:
     processes: dict[str, str] = {}
     for row in csv.reader(output.splitlines()):
         if len(row) >= 2:
+            if row[1] == "0":
+                continue
             name = row[0].removesuffix(".exe")
             processes[row[1]] = name
     return processes
@@ -185,6 +197,18 @@ def is_local_or_private_host(host: str) -> bool:
     )
 
 
+def is_external_connection(connection: Connection) -> bool:
+    return not is_local_or_private_host(get_endpoint_host(connection.remote))
+
+
+def merge_connection(target: dict[str, Connection], connection: Connection) -> None:
+    existing = target.get(connection.key)
+    if existing:
+        existing.touch(connection.observed_at)
+        return
+    target[connection.key] = connection
+
+
 def get_netstat_snapshot() -> list[Connection]:
     processes = get_process_map()
     output = run_command(["netstat", "-ano"])
@@ -206,7 +230,7 @@ def get_netstat_snapshot() -> list[Connection]:
                     remote=parts[2],
                     state=parts[3],
                     pid=pid,
-                    process=processes.get(pid, ""),
+                    process=processes.get(pid, "(сессия закрыта)" if pid == "0" else ""),
                     remote_port=get_port(parts[2]),
                     observed_at=now,
                 )
@@ -220,7 +244,7 @@ def get_netstat_snapshot() -> list[Connection]:
                     remote=parts[2],
                     state="OPEN",
                     pid=pid,
-                    process=processes.get(pid, ""),
+                    process=processes.get(pid, "(сессия закрыта)" if pid == "0" else ""),
                     remote_port=get_port(parts[2]),
                     observed_at=now,
                 )
@@ -275,11 +299,11 @@ def build_adapter_rows(start_rows: list[AdapterStat], end_rows: list[AdapterStat
 
 def build_analysis_rows(connections: list[Connection], adapter_rows: list[dict[str, object]]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    external = [c for c in connections if not is_local_or_private_host(get_endpoint_host(c.remote))]
-    established = [c for c in connections if c.state == "ESTABLISHED"]
-    listening = [c for c in connections if c.state == "LISTENING"]
-    udp_open = [c for c in connections if c.proto == "UDP"]
-    waiting = [c for c in connections if c.state in {"TIME_WAIT", "CLOSE_WAIT"}]
+    external = [c for c in connections if is_external_connection(c)]
+    internal = [c for c in connections if not is_external_connection(c)]
+    external_established = [c for c in external if c.state == "ESTABLISHED"]
+    external_waiting = [c for c in external if c.state in {"TIME_WAIT", "CLOSE_WAIT"}]
+    external_udp = [c for c in external if c.proto == "UDP"]
 
     def add(level: str, finding: str, details: str) -> None:
         rows.append({"level": level, "finding": finding, "details": details})
@@ -288,9 +312,9 @@ def build_analysis_rows(connections: list[Connection], adapter_rows: list[dict[s
         "Инфо",
         "Область сбора",
         (
-            f"Наблюдено {len(connections)} уникальных сокетов: "
-            f"{len(established)} установленных, {len(listening)} прослушивающих, "
-            f"{len(udp_open)} UDP/открытых."
+            f"Наблюдено {len(connections)} уникальных сессий: "
+            f"{len(external)} внешних и {len(internal)} внутренних/служебных. "
+            "Дальнейший анализ сфокусирован на внешнем трафике."
         ),
     )
 
@@ -305,62 +329,72 @@ def build_analysis_rows(connections: list[Connection], adapter_rows: list[dict[s
         add("Заметка", "Нет прироста трафика по адаптерам", "Счетчики интерфейсов пока не изменились.")
 
     if external:
-        add("Инфо", "Внешний трафик", f"{len(external)} сокетов указывают на публичные удаленные адреса.")
-    else:
-        add("Заметка", "В основном локальный трафик", "Публичные удаленные адреса не обнаружены.")
-
-    top_processes = group_count(connections, "process", 5)
-    if top_processes:
-        add("Инфо", "Самые заметные процессы", ", ".join(f"{r['name']} ({r['count']})" for r in top_processes))
-
-    external_processes = group_count(external, "process", 5)
-    if external_processes:
         add(
-            "Проверить",
-            "Процессы с внешними подключениями",
-            ", ".join(f"{r['name']} ({r['count']})" for r in external_processes),
+            "Инфо",
+            "Внешний трафик",
+            (
+                f"{len(external)} внешних сессий: {len(external_established)} активных TCP, "
+                f"{len(external_udp)} UDP/открытых, {len(external_waiting)} ожидающих закрытия."
+            ),
         )
+    else:
+        add("Норма", "Внешний трафик не обнаружен", "Во время анализа публичные удаленные адреса не появлялись.")
+
+    top_processes = group_count(external, "process", 5)
+    if top_processes:
+        add("Инфо", "Самые заметные внешние процессы", ", ".join(f"{r['name']} ({r['count']})" for r in top_processes))
 
     external_ports = group_count(external, "remote_port", 5)
     if external_ports:
-        add("Инфо", "Частые внешние порты", ", ".join(f"{r['name']} ({r['count']})" for r in external_ports))
+        port_text = ", ".join(f"{r['name']} ({r['count']})" for r in external_ports)
+        common_port_count = sum(1 for item in external if item.remote_port in {"80", "443", "53", "123"})
+        common_ratio = common_port_count / len(external) if external else 0
+        if common_ratio >= 0.9:
+            add("Норма", "Внешние порты выглядят типично", f"{common_port_count} из {len(external)} внешних сессий идут через web/DNS/time-порты. Топ: {port_text}.")
+        else:
+            add("Внимание", "Есть заметная доля нетипичных портов", port_text)
 
-    close_wait = [c for c in connections if c.state == "CLOSE_WAIT"]
+    close_wait = [c for c in external if c.state == "CLOSE_WAIT"]
     if close_wait:
         processes = ", ".join(f"{r['name']} ({r['count']})" for r in group_count(close_wait, "process", 5))
         add(
             "Проверить",
             "Сокеты CLOSE_WAIT",
-            f"{len(close_wait)} сокетов ожидают закрытия локальным приложением. Процессы: {processes}.",
+            f"{len(close_wait)} внешних сессий ожидают закрытия локальным приложением. Процессы: {processes}.",
         )
 
-    if len(waiting) > 30:
+    if len(external_waiting) > 30:
         add(
-            "Заметка",
+            "Внимание",
             "Много коротких соединений",
-            f"{len(waiting)} сокетов находятся в TIME_WAIT/CLOSE_WAIT. Это часто бывает у браузеров и мессенджеров.",
+            f"{len(external_waiting)} внешних сессий находятся в TIME_WAIT/CLOSE_WAIT. Это часто бывает у браузеров и мессенджеров.",
         )
 
     non_web = [c for c in external if c.remote_port not in {"80", "443", "53", "123", "*", "0"}]
     if non_web:
         ports = ", ".join(f"{r['name']} ({r['count']})" for r in group_count(non_web, "remote_port", 5))
         add("Проверить", "Нестандартные внешние порты", f"{len(non_web)} сокетов используют порты: {ports}.")
+    elif external:
+        add("Норма", "Нестандартные внешние порты не найдены", "Во внешних сессиях видны только типичные web/DNS/time-порты.")
 
-    unknown = [c for c in connections if not c.process]
+    unknown = [c for c in external if not c.process]
     if unknown:
         add(
             "Заметка",
             "Неизвестные процессы",
-            f"{len(unknown)} сокетов не удалось связать с процессом. Возможно, процесс завершился во время сбора.",
+            f"{len(unknown)} внешних сессий не удалось связать с процессом. Возможно, процесс завершился во время сбора.",
         )
 
     return rows
 
 
-def connection_rows(connections: list[Connection]) -> list[dict[str, object]]:
+def connection_rows(connections: list[Connection], external_only: bool = False) -> list[dict[str, object]]:
+    visible_connections = [item for item in connections if is_external_connection(item)] if external_only else connections
     return [
         {
-            "observed_at": item.observed_at.strftime("%H:%M:%S"),
+            "first_seen": item.observed_at.strftime("%H:%M:%S"),
+            "last_seen": item.last_seen.strftime("%H:%M:%S"),
+            "seen_count": item.seen_count,
             "proto": item.proto,
             "local": item.local,
             "remote": item.remote,
@@ -368,19 +402,21 @@ def connection_rows(connections: list[Connection]) -> list[dict[str, object]]:
             "pid": item.pid,
             "process": item.process,
         }
-        for item in sorted(connections, key=lambda row: row.observed_at)
+        for item in sorted(visible_connections, key=lambda row: row.last_seen, reverse=True)
     ]
 
 
 def save_connections_csv(path: str, connections: Iterable[Connection]) -> None:
-    fieldnames = ["observed_at", "proto", "local", "remote", "state", "pid", "process", "remote_port"]
+    fieldnames = ["first_seen", "last_seen", "seen_count", "proto", "local", "remote", "state", "pid", "process", "remote_port"]
     with open(path, "w", newline="", encoding="utf-8-sig") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
-        for item in sorted(connections, key=lambda row: row.observed_at):
+        for item in sorted(connections, key=lambda row: row.last_seen, reverse=True):
             writer.writerow(
                 {
-                    "observed_at": item.observed_at.isoformat(timespec="seconds"),
+                    "first_seen": item.observed_at.isoformat(timespec="seconds"),
+                    "last_seen": item.last_seen.isoformat(timespec="seconds"),
+                    "seen_count": item.seen_count,
                     "proto": item.proto,
                     "local": item.local,
                     "remote": item.remote,

@@ -16,6 +16,8 @@ from traffic_checker_core import (
     get_adapter_stats,
     get_netstat_snapshot,
     group_count,
+    is_external_connection,
+    merge_connection,
     save_connections_csv,
 )
 
@@ -40,6 +42,7 @@ class TrafficCheckerApp(tk.Tk):
         self.running = False
         self.duration = 60
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.show_internal_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.after(200, self._process_events)
@@ -65,6 +68,14 @@ class TrafficCheckerApp(tk.Tk):
         self.save_button = ttk.Button(toolbar, text="Сохранить CSV", command=self.save_csv, state=tk.DISABLED)
         self.save_button.pack(side=tk.LEFT, padx=(10, 18))
 
+        self.internal_check = ttk.Checkbutton(
+            toolbar,
+            text="Показывать внутренние",
+            variable=self.show_internal_var,
+            command=self._refresh_tables,
+        )
+        self.internal_check.pack(side=tk.LEFT, padx=(0, 18))
+
         self.status_var = tk.StringVar(value="Готово.")
         ttk.Label(toolbar, textvariable=self.status_var).pack(side=tk.LEFT)
 
@@ -80,7 +91,11 @@ class TrafficCheckerApp(tk.Tk):
         self._add_grid("processes", "Процессы", ["name", "count"])
         self._add_grid("states", "Состояния", ["name", "count"])
         self._add_grid("ports", "Порты", ["name", "count"])
-        self._add_grid("connections", "Соединения", ["observed_at", "proto", "local", "remote", "state", "pid", "process"])
+        self._add_grid(
+            "connections",
+            "Сессии",
+            ["first_seen", "last_seen", "seen_count", "proto", "local", "remote", "state", "pid", "process"],
+        )
 
     def _add_grid(self, key: str, title: str, columns: list[str]) -> None:
         frame = ttk.Frame(self.tabs)
@@ -108,7 +123,9 @@ class TrafficCheckerApp(tk.Tk):
             "total": "Всего",
             "name": "Название",
             "count": "Количество",
-            "observed_at": "Замечено",
+            "first_seen": "Первый раз",
+            "last_seen": "Последний раз",
+            "seen_count": "Повторы",
             "proto": "Протокол",
             "local": "Локальный адрес",
             "remote": "Удаленный адрес",
@@ -199,7 +216,7 @@ class TrafficCheckerApp(tk.Tk):
 
     def _merge_snapshot(self, snapshot: object) -> None:
         for connection in snapshot:
-            self.state.connections.setdefault(connection.key, connection)
+            merge_connection(self.state.connections, connection)
         self.state.samples += 1
 
     def _update_progress(self, elapsed: float) -> None:
@@ -211,14 +228,15 @@ class TrafficCheckerApp(tk.Tk):
 
     def _refresh_tables(self) -> None:
         connections = list(self.state.connections.values())
+        visible_connections = connections if self.show_internal_var.get() else [item for item in connections if is_external_connection(item)]
         adapter_rows = build_adapter_rows(self.state.adapter_start, get_adapter_stats())
 
         self.set_rows("analysis", build_analysis_rows(connections, adapter_rows))
         self.set_rows("adapters", [{key: row[key] for key in ("adapter", "status", "received", "sent", "total")} for row in adapter_rows])
-        self.set_rows("processes", group_count(connections, "process", 100))
-        self.set_rows("states", group_count(connections, "state", 100))
-        self.set_rows("ports", group_count(connections, "remote_port", 100))
-        self.set_rows("connections", connection_rows(connections))
+        self.set_rows("processes", group_count(visible_connections, "process", 100))
+        self.set_rows("states", group_count(visible_connections, "state", 100))
+        self.set_rows("ports", group_count(visible_connections, "remote_port", 100))
+        self.set_rows("connections", connection_rows(connections, external_only=not self.show_internal_var.get()))
 
     def _finish_capture(self) -> None:
         self.running = False
