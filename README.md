@@ -1,10 +1,10 @@
 # TrafficChecker
 
-Простое Windows-приложение для базового сбора и анализа сетевой активности
-текущего устройства.
+TrafficChecker - простое Windows-приложение на Python для базового сбора и
+анализа сетевой активности текущего устройства.
 
-На первом этапе программа не перехватывает содержимое пакетов и не читает
-передаваемые данные. Она собирает только техническую картину сетевой активности:
+Программа не перехватывает содержимое пакетов и не читает передаваемые данные.
+Она собирает только техническую картину сетевой активности:
 
 - изменение входящего и исходящего трафика по сетевым адаптерам;
 - активные TCP/UDP-соединения;
@@ -13,7 +13,7 @@
 - часто используемые удаленные порты;
 - понятный анализ наблюдаемой картины.
 
-## Запуск
+## Запуск приложения
 
 Самый удобный способ:
 
@@ -21,16 +21,36 @@
 2. Запустите файл `Run-TrafficChecker.cmd`.
 3. В окне программы выберите время анализа и нажмите `Запустить`.
 
-Из терминала VS Code можно запустить так:
+Из терминала VS Code:
 
-```powershell
+```console
 .\Run-TrafficChecker.cmd
 ```
 
-Также приложение можно открыть напрямую:
+Или напрямую через Python:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\traffic-checker-app.ps1
+```console
+python traffic_checker_app.py
+```
+
+## Консольный режим
+
+Для быстрой проверки без окна:
+
+```console
+python traffic_checker_cli.py --duration 60
+```
+
+Сбор за 30 секунд с выборкой каждые 3 секунды:
+
+```console
+python traffic_checker_cli.py --duration 30 --interval 3
+```
+
+Сохранение найденных соединений в CSV:
+
+```console
+python traffic_checker_cli.py --duration 60 --csv traffic-report.csv
 ```
 
 ## Что показывает программа
@@ -49,25 +69,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\traffic-checker-app.ps1
 Остальные вкладки показывают сырые таблицы: адаптеры, процессы, состояния,
 порты и список соединений.
 
-## Консольный режим
+## Структура проекта
 
-Для отладки оставлен консольный скрипт. Сбор за одну минуту:
-
-```powershell
-.\traffic-checker.ps1
-```
-
-Сбор за 30 секунд:
-
-```powershell
-.\traffic-checker.ps1 -DurationSeconds 30 -IntervalSeconds 3
-```
-
-Сохранение найденных соединений в CSV:
-
-```powershell
-.\traffic-checker.ps1 -DurationSeconds 60 -CsvPath .\traffic.csv
-```
+- `traffic_checker_core.py` - сбор данных, группировка, анализ и экспорт CSV.
+- `traffic_checker_app.py` - оконное приложение на `tkinter`.
+- `traffic_checker_cli.py` - консольный запуск для отладки.
+- `Run-TrafficChecker.cmd` - простой запуск приложения на Windows.
 
 ## Приватность
 
