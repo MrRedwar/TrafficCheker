@@ -1,7 +1,8 @@
-.vscode/
-__pycache__/
+.git
+.vscode
+__pycache__
 *.pyc
-.venv/
-venv/
+.venv
+venv
 traffic*.csv
 traffic_checker.local.json

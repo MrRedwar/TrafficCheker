@@ -9,13 +9,19 @@ from traffic_checker_core import (
     CaptureState,
     build_adapter_rows,
     build_analysis_rows,
+    build_dns_cache,
+    collect_host_reputation,
+    collect_ip_owners,
     connection_rows,
     get_adapter_stats,
     get_netstat_snapshot,
     group_count,
     is_external_connection,
     merge_connection,
+    owner_rows,
+    reputation_rows,
     save_connections_csv,
+    site_rows,
 )
 
 
@@ -61,21 +67,27 @@ def main() -> None:
     connections = list(state.connections.values())
     external_connections = [item for item in connections if is_external_connection(item)]
     adapter_rows = build_adapter_rows(state.adapter_start, get_adapter_stats())
+    dns_cache = build_dns_cache()
+    owner_cache = collect_ip_owners(connections, {}, limit=15)
+    threat_cache = collect_host_reputation(connections, dns_cache, {}, limit=500)
 
     print(f"\nГотово. Выборок: {state.samples}. Сессий: {len(connections)}. Внешних: {len(external_connections)}.")
-    print_table("Анализ", build_analysis_rows(connections, adapter_rows), ["level", "finding", "details"])
+    print_table("Анализ", build_analysis_rows(connections, adapter_rows, dns_cache, owner_cache, threat_cache), ["level", "finding", "details"])
     print_table("Адаптеры", adapter_rows, ["adapter", "status", "received", "sent", "total"])
     print_table("Процессы", group_count(external_connections, "process", 25), ["name", "count"])
+    print_table("Сайты", site_rows(connections, dns_cache=dns_cache, owner_cache=owner_cache, threat_cache=threat_cache, external_only=True, limit=25), ["site", "safety", "risk_rating", "owner", "process", "remote_port", "sessions", "first_seen", "last_seen", "ips"])
+    print_table("Владельцы IP", owner_rows(external_connections, owner_cache=owner_cache, limit=25), ["owner", "sessions", "first_seen", "last_seen", "ips"])
+    print_table("Безопасность", reputation_rows(external_connections, dns_cache=dns_cache, threat_cache=threat_cache, limit=25), ["site", "safety", "risk_rating", "threat_source", "threat_details", "sessions", "first_seen", "last_seen"])
     print_table("Состояния", group_count(external_connections, "state", 25), ["name", "count"])
     print_table("Порты", group_count(external_connections, "remote_port", 25), ["name", "count"])
     print_table(
         "Сессии",
-        connection_rows(connections, external_only=True)[:25],
-        ["first_seen", "last_seen", "seen_count", "proto", "local", "remote", "state", "pid", "process"],
+        connection_rows(connections, external_only=True, dns_cache=dns_cache, owner_cache=owner_cache, threat_cache=threat_cache)[:25],
+        ["first_seen", "last_seen", "seen_count", "site", "safety", "risk_rating", "owner", "proto", "local", "remote", "state", "pid", "process"],
     )
 
     if args.csv:
-        save_connections_csv(args.csv, connections)
+        save_connections_csv(args.csv, connections, dns_cache, owner_cache, threat_cache)
         print(f"\nCSV сохранен: {args.csv}")
 
 
